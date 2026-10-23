@@ -1,0 +1,23 @@
+[project]
+name = "steer"
+version = "0.1.0"
+description = "MultiWOZ contrastive response pairs for activation-steering experiments"
+readme = "README.md"
+authors = [
+    { name = "arya", email = "arya.lavasani@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "datasets>=5.1.0",
+]
+
+[project.scripts]
+steer = "steer.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.4,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+# Rebuild the installed package when Python source files change.
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.py" }]
