@@ -30,6 +30,7 @@ class ContrastivePair(ResponseEdit):
     dialogue_id: str
     turn_id: str
     prompt: str
+    messages: list[dict[str, str]]
 
 
 def normalize_text(text: object) -> str:
@@ -144,5 +145,10 @@ def create_pairs(
                 "dialogue_id": row["dialogue_id"],
                 "turn_id": turns["turn_id"][index],
                 "prompt": history + "\nAssistant:",
+                "messages": [
+                    {"role": "user" if is_user(turns, j) else "assistant",
+                     "content": turns["utterance"][j]}
+                    for j in range(index)
+                ],
                 **pair,
             }

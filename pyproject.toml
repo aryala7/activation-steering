@@ -6,13 +6,16 @@ readme = "README.md"
 authors = [
     { name = "arya", email = "arya.lavasani@gmail.com" }
 ]
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = [
     "datasets>=5.1.0",
 ]
 
+[project.optional-dependencies]
+models = ["torch>=2.2", "transformers>=4.45,<5"]
+
 [project.scripts]
-steer = "steer.cli:main"
+steer = "steer.main:main"
 
 [build-system]
 requires = ["uv_build>=0.13.4,<0.14.0"]

@@ -1,53 +1,68 @@
 # Steer
 
-Generate contrastive system-response pairs from MultiWOZ 2.2 for activation-steering experiments.
+One experiment pipeline: load MultiWOZ 2.2, generate contrastive response pairs,
+run the model, and save activations and steering directions.
 
 ## Run
 
-Install the project and its dependencies with `uv sync`, then run:
-
 ```sh
-uv run --no-editable steer --limit 10 --seed 42
-uv run --no-editable python -m steer --limit 10 --seed 42
+uv run --no-editable --extra models steer --limit 10 --layers 0 7 14
 ```
 
-The default processes the first training dialogue. `--limit` counts dialogues,
-not pairs. `--split` selects the dataset split. Output is JSON Lines on stdout;
-the dataset must be downloadable or already cached.
+The command installs the required dependencies and downloads the dataset/model
+when necessary. `--no-editable` avoids the macOS hidden `.pth` import issue.
 
-Each record contains the shared `prompt`, `positive_response`,
-`negative_response`, source dialogue/turn IDs, and the edited slot/span metadata.
-The prompt includes preceding user and assistant turns but excludes the target
-response and all subsequent turns.
+Options:
 
-## Structure
+- `--limit`: number of dialogues, default 10 (not number of pairs).
+- `--split`: dataset split, default `train`.
+- `--seed`: pair-generation random seed, default 42.
+- `--model`: default `Qwen/Qwen2.5-0.5B-Instruct`.
+- `--layers`: zero-based transformer block indices, default `14`.
+- `--device`: `cpu` (default), `cuda`, or `mps`.
+- `--output-dir`: results directory, default `outputs`.
 
-- `src/steer/contrastive_pairs.py`: pure pair generation and output types.
-- `src/steer/ontology.py`: supported slot values.
-- `src/steer/cli.py`: argument parsing, dataset loading, and JSON output.
-- `src/steer/__init__.py`: public Python API (`create_pairs`, `ContrastivePair`).
-- `src/steer/__main__.py`: module execution entry point.
-- `tests/test_contrastive_pairs.py`: pair-generation regression tests.
-- `tests/test_cli.py`: CLI validation and output tests.
+Each run writes `pairs.jsonl` and `activations.pt` to the output directory,
+overwriting earlier results there. Use a different output directory for each
+experiment you want to keep.
 
-## Pair selection
+## Code organization
 
-Only annotated system `Inform` and `Recommend` responses are candidates.
-The original value must match the latest user-state constraint and the annotated
-character span. A negative replaces that span with a value outside all allowed
-values. User turns are never edited. Empty or cleared constraints are not reused.
+`src/steer/main.py` is the single entry point and owns the complete workflow.
+`__main__.py` delegates to it for `python -m steer`. The remaining modules
+provide reusable functions and do not execute independently:
 
-Supported slots are hotel/restaurant area and price range. These are candidate
-constraint-violation pairs, not guarantees that the complete original response
-is factually correct. Review a sample before using them in experiments.
+- `contrastive_pairs.py`: generate positive/negative system responses.
+- `ontology.py`: supported hotel/restaurant area and price values.
+- `models/model.py`: format chat inputs, capture activations, calculate vectors.
+
+## What is captured
+
+Each pair shares the same preceding user/assistant history. The original system
+response is the positive candidate; a negative replaces one annotated value
+with a value that contradicts the latest user-state constraint. These are
+candidate pairs, not guarantees that the entire positive response is correct.
+
+Both candidates are passed as assistant responses using the model's chat
+template. The code records post-block residual states at the final response
+content token, excluding the end marker. It does not generate text or apply
+steering. Qwen2/Llama-style `model.model.layers` layouts are supported.
+Overlong inputs raise an error instead of silently truncating context.
+
+The activation file stores:
+
+- Positive/negative activations and differences: `[pairs, layers, hidden_size]`.
+- Raw mean differences and unit directions: `[layers, hidden_size]`.
+- Source pairs and model, layer, token-position, dataset, split, and seed metadata.
+
+Differences are positive minus negative. Raw means retain their magnitude;
+unit directions are normalized separately for each layer.
 
 ## Tests
 
 ```sh
-uv run python -m unittest discover -s tests -v
+uv run --no-editable --extra models python -m unittest discover -s tests -v
 ```
 
-On macOS, Python ignores `.pth` files marked hidden. If this causes a
-`ModuleNotFoundError`, use `uv run --no-editable` as above. This installs the
-package directly. Source files are included in the uv cache keys so changes
-trigger a rebuild. Keep `--no-editable` on subsequent runs.
+Tests use small local models and mocked downloads, so no pretrained weights
+are needed.
