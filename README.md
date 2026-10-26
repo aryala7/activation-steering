@@ -17,7 +17,7 @@ Options:
 - `--limit`: number of dialogues, default 10 (not number of pairs).
 - `--split`: dataset split, default `train`.
 - `--seed`: pair-generation random seed, default 42.
-- `--model`: default `Qwen/Qwen2.5-0.5B-Instruct`.
+- `--model`: `mistral` (default), `llama`, or a full Hugging Face model ID.
 - `--layers`: zero-based transformer block indices, default `14`.
 - `--device`: `cpu` (default), `cuda`, or `mps`.
 - `--output-dir`: results directory, default `outputs`.
@@ -25,6 +25,23 @@ Options:
 Each run writes `pairs.jsonl` and `activations.pt` to the output directory,
 overwriting earlier results there. Use a different output directory for each
 experiment you want to keep.
+
+## Models
+
+| Alias | Hugging Face model |
+| --- | --- |
+| `mistral` (default) | `mistralai/Mistral-7B-Instruct-v0.3` |
+| `llama` | `meta-llama/Llama-3.1-8B-Instruct` |
+
+Run each model separately with its own output directory:
+
+```sh
+uv run --no-editable --extra models steer --model mistral --output-dir outputs/mistral
+uv run --no-editable --extra models steer --model llama --output-dir outputs/llama
+```
+
+Each run loads the selected model and its matching tokenizer. Activations and
+steering vectors are computed independently for each model.
 
 ## Code organization
 

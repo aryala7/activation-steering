@@ -7,8 +7,15 @@ from pathlib import Path
 
 from steer.contrastive_pairs import create_pairs
 from steer.models.model import make_vector
+from datasets import load_dataset
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 DATASET_ID = "tuetschek/multi_woz_v22"
+MODELS = {
+    "mistral": "mistralai/Mistral-7B-Instruct-v0.3",
+    "llama": "meta-llama/Llama-3.1-8B-Instruct",
+}
 
 
 def main(argv=None) -> None:
@@ -16,19 +23,19 @@ def main(argv=None) -> None:
     parser.add_argument("--split", default="train")
     parser.add_argument("--limit", type=int, default=10, help="Number of dialogues")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser.add_argument(
+        "--model", default="mistral",
+        help="Model alias (mistral or llama) or Hugging Face model ID; default: mistral",
+    )
     parser.add_argument("--layers", nargs="+", type=int, default=[14])
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps"])
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
     args = parser.parse_args(argv)
+    args.model = MODELS.get(args.model, args.model)
     if args.limit < 1:
         parser.error("--limit must be positive")
     if min(args.layers) < 0 or len(set(args.layers)) != len(args.layers):
         parser.error("--layers must contain unique, nonnegative indices")
-
-    from datasets import load_dataset
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     # 1. Generate contrastive pairs from the selected dialogues.
     print(f"Loading {DATASET_ID} ({args.split})...")
@@ -44,7 +51,7 @@ def main(argv=None) -> None:
     # 2. Load the model once and capture both responses with their context.
     print(f"Loading {args.model} on {args.device}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float32)
     model.to(args.device).eval()
     result = make_vector(model, tokenizer, pairs, args.layers)
     result.update({
