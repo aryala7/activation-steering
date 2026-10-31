@@ -43,9 +43,77 @@ uv run --no-editable --extra models steer --model llama --output-dir outputs/lla
 Each run loads the selected model and its matching tokenizer. Activations and
 steering vectors are computed independently for each model.
 
+## Select a steering layer (Mistral)
+
+First extract candidate layers **from training dialogues only**:
+
+```sh
+uv run --no-editable --extra models steer --model mistral --split train \
+  --limit 300 --layers 8 12 16 20 24 --output-dir outputs/mistral-train
+```
+
+This `--limit` counts dialogues, not pairs. Inspect the printed number of pairs;
+increase it if too few are eligible. Then generate on *different*, held-out
+validation dialogues, using one unsteered baseline and each layer/strength:
+
+```sh
+uv run --no-editable --extra models steer sweep \
+  --activations outputs/mistral-train/activations.pt \
+  --limit 10 --strengths 0.5 1 --output-dir outputs/mistral-sweep
+```
+
+The sweep uses the raw mean difference at each layer and greedy generation.
+It requires the training artifact to use Mistral. Start with a few turns: a
+7B model on CPU needs substantial RAM and may generate very slowly. For the
+actual layer comparison, increase `--limit` (for example to 100) and, after
+the coarse sweep, extract and test neighboring layers in a separate run.
+The `--max-new-tokens` default is 64; use the same value for every condition.
+
+`predictions.jsonl` records responses and their layer/strength. `review.csv`
+contains the same responses in shuffled order without showing the condition.
+For **every** row, fill both columns with `0` or `1`:
+
+- `constraint_ok`: 1 if the response makes no claim contradicting the active
+  user constraints; 0 if it does. Check named hotels/restaurants against a
+  database if claims about them cannot be judged from the text alone.
+- `useful`: 1 if the response addresses the user's request with relevant
+  information, or a justified explanation/clarification; 0 for evasive,
+  unrelated, empty, or garbled responses.
+
+A vague answer can be `constraint_ok=1, useful=0`. Check the dialogue history
+and constraints while reviewing; the original MultiWOZ system response is not
+shown or treated as an unquestionable reference. Then print the fractions for
+each condition (sorted by the fraction satisfying both criteria):
+
+```sh
+uv run --no-editable --extra models steer rank \
+  --predictions outputs/mistral-sweep/predictions.jsonl \
+  --review outputs/mistral-sweep/review.csv
+```
+
+Choose a validation layer/strength that improves `both` over baseline without
+a notable drop in usefulness. If none improves it, report that finding; do not
+declare a layer best merely because its vector is large or its activations
+separate well in a plot. Once chosen, run the same frozen configuration on the
+MultiWOZ `test` split for the final result:
+
+```sh
+uv run --no-editable --extra models steer sweep \
+  --activations outputs/mistral-train/activations.pt \
+  --eval-split test --layers 12 --strengths 1 \
+  --limit 100 --output-dir outputs/mistral-test
+```
+
+Replace `12` and `1` with your chosen values. Keep the generation settings and
+review rules fixed. Do not use validation/test pairs to calculate vectors.
+This is a turn-level evaluation with the real preceding
+dialogue as context, not a full interactive rollout or the standard
+delexicalized MultiWOZ Inform/Success evaluator.
+
 ## Code organization
 
-`src/steer/main.py` is the single entry point and owns the complete workflow.
+`src/steer/main.py` is the single entry point and owns the extraction, sweep,
+and review commands.
 `__main__.py` delegates to it for `python -m steer`. The remaining modules
 provide reusable functions and do not execute independently:
 
@@ -64,7 +132,10 @@ Both candidates are passed as assistant responses using the model's chat
 template. The code records post-block residual states at the final response
 content token, excluding the end marker. It does not generate text or apply
 steering. Qwen2/Llama-style `model.model.layers` layouts are supported.
-Overlong inputs raise an error instead of silently truncating context.
+Overlong inputs raise an error instead of silently truncating context. During
+the sweep the hook changes the final prompt position (which predicts the first
+answer token) and each later decode step, without altering earlier positions
+in the dialogue history. It is removed after each generation.
 
 The activation file stores:
 

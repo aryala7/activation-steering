@@ -1,6 +1,7 @@
 """Capture context-conditioned response activations from Qwen/Llama-style models."""
 
 from functools import partial
+from contextlib import contextmanager
 
 
 def parse_history(prompt: str) -> list[dict[str, str]]:
@@ -156,3 +157,73 @@ def make_vector(model, tokenizer, pairs: list[dict], layers: list[int]) -> dict:
         "token_position": "last_response_content_token",
         "activation_location": "transformer_block_output_before_final_norm",
     }
+
+
+@contextmanager
+def steering_hook(model, layer: int, vector, strength: float):
+    """Steer the next-token prediction and subsequent decode steps at one block.
+
+    During prefill the last prompt position predicts the first answer token;
+    earlier prompt positions stay untouched. With a KV cache, the block sees
+    just the new token at later steps. Hook removal is guaranteed on failure.
+    """
+    import torch
+
+    blocks = getattr(getattr(model, "model", None), "layers", None)
+    if blocks is None or not 0 <= layer < len(blocks):
+        raise ValueError("Invalid model layer for steering")
+    if vector.ndim != 1:
+        raise ValueError("Steering vector must have shape [hidden_size]")
+
+    def add_direction(_module, _inputs, output):
+        hidden = output[0] if isinstance(output, tuple) else output
+        if hidden.ndim != 3 or hidden.shape[-1] != vector.numel():
+            raise ValueError("Steering vector does not match hidden states")
+        delta = vector.to(device=hidden.device, dtype=hidden.dtype) * strength
+        changed = hidden.clone()
+        changed[:, -1, :] += delta
+        if isinstance(output, tuple):
+            return (changed, *output[1:])
+        return changed
+
+    handle = blocks[layer].register_forward_hook(add_direction)
+    try:
+        yield
+    finally:
+        handle.remove()
+
+
+def generate_response(model, tokenizer, messages, max_new_tokens: int,
+                      layer: int | None = None, vector=None, strength: float = 0.0) -> str:
+    """Generate one deterministic response with optional single-layer steering."""
+    import torch
+
+    if max_new_tokens < 1:
+        raise ValueError("max_new_tokens must be positive")
+    if not messages or messages[-1]["role"] != "user":
+        raise ValueError("Dialogue history must end in a user message")
+    inputs = tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=True,
+        return_dict=True, return_tensors="pt", truncation=False,
+    )
+    input_length = inputs["input_ids"].shape[-1]
+    max_positions = getattr(model.config, "max_position_embeddings", None)
+    if max_positions and input_length + max_new_tokens > max_positions:
+        raise ValueError("Dialogue and generation exceed the model context window")
+    device = model.get_input_embeddings().weight.device
+    model_inputs = {key: value.to(device) for key, value in inputs.items()}
+    if (layer is None) != (vector is None):
+        raise ValueError("Provide both layer and vector, or neither")
+    if layer is None and strength:
+        raise ValueError("A nonzero strength requires a layer and vector")
+
+    from contextlib import nullcontext
+    intervention = (steering_hook(model, layer, vector, strength)
+                    if layer is not None and strength else nullcontext())
+    model.eval()
+    with torch.inference_mode(), intervention:
+        output = model.generate(
+            **model_inputs, max_new_tokens=max_new_tokens, do_sample=False,
+            use_cache=True, pad_token_id=tokenizer.eos_token_id,
+        )
+    return tokenizer.decode(output[0, input_length:], skip_special_tokens=True).strip()

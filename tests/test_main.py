@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from steer.main import DATASET_ID, main
@@ -31,16 +30,12 @@ class PipelineTests(unittest.TestCase):
         model_factory = Mock()
         model_factory.from_pretrained.return_value = model
         tokenizer_factory = Mock()
-        torch = SimpleNamespace(float32="float32", __version__="test", save=Mock())
-        modules = {
-            "datasets": SimpleNamespace(load_dataset=loader),
-            "torch": torch,
-            "transformers": SimpleNamespace(
-                AutoModelForCausalLM=model_factory, AutoTokenizer=tokenizer_factory
-            ),
-        }
+        torch = Mock(float32="float32", __version__="test")
         with tempfile.TemporaryDirectory() as directory:
-            with patch.dict("sys.modules", modules), redirect_stdout(io.StringIO()):
+            with patch("steer.main.load_dataset", loader), \
+                 patch("steer.main.AutoModelForCausalLM", model_factory), \
+                 patch("steer.main.AutoTokenizer", tokenizer_factory), \
+                 patch("steer.main.torch", torch), redirect_stdout(io.StringIO()):
                 with patch("steer.main.make_vector", return_value={}) as capture:
                     main(["--split", "validation", "--limit", "10", "--layers", "0", "1",
                           "--output-dir", directory])

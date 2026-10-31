@@ -4,7 +4,8 @@ import importlib.util
 import unittest
 from unittest.mock import Mock
 
-from steer.models.model import capture_activations, encode, make_vector, response_messages
+from steer.models.model import (capture_activations, encode, make_vector,
+                                response_messages, steering_hook)
 
 
 def example_pair():
@@ -103,3 +104,18 @@ class ActivationTests(unittest.TestCase):
                 capture_activations(self.model, self.inputs, layers)
         with self.assertRaises(ValueError):
             make_vector(self.model, None, [], [0])
+
+    def test_generation_hook_only_changes_predictive_position(self):
+        torch = self.torch
+        plain = self.model(self.inputs["input_ids"])
+        with steering_hook(self.model, 0, torch.ones(4), strength=2):
+            steered = self.model(self.inputs["input_ids"])
+        torch.testing.assert_close(plain[:, :-1], steered[:, :-1])
+        torch.testing.assert_close(steered[:, -1] - plain[:, -1], torch.full((1, 4), 2.0))
+        self.assertFalse(self.model.model.layers[0]._forward_hooks)
+
+    def test_generation_hook_cleanup_on_error(self):
+        with self.assertRaisesRegex(RuntimeError, "failed"):
+            with steering_hook(self.model, 0, self.torch.ones(4), 1):
+                raise RuntimeError("failed")
+        self.assertFalse(self.model.model.layers[0]._forward_hooks)
