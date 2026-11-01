@@ -180,6 +180,9 @@ def mlx_layer_taps(model, callbacks):
             super().__init__()
             self.block = block
             self.callback = callback
+            # mlx-lm's Llama/Mistral forward and KV-cache setup inspect this
+            # flag on every block before invoking it.
+            self.use_sliding = block.use_sliding
 
         def __call__(self, *args, **kwargs):
             return self.callback(self.block(*args, **kwargs))

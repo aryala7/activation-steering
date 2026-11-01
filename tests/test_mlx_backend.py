@@ -14,6 +14,8 @@ from steer.models.model import make_vector, mlx_capture_pair, mlx_generate_respo
 
 
 class Block:
+    use_sliding = False
+
     def __call__(self, hidden):
         return hidden + 1
 
@@ -25,7 +27,11 @@ class Model:
 
     def __call__(self, ids):
         hidden = np.repeat(np.asarray(ids, dtype=np.float32)[:, :, None], 4, axis=-1)
-        return self.model.layers[0](hidden)
+        for layer in self.model.layers:
+            # mlx-lm reads this on the block before calling it.
+            self.asserted_sliding = layer.use_sliding
+            hidden = layer(hidden)
+        return hidden
 
 
 class Tokenizer:
@@ -58,6 +64,7 @@ class MLXBackendTests(unittest.TestCase):
         }
         positive, negative = mlx_capture_pair(model, Tokenizer(), pair, [0])
         torch.testing.assert_close(positive - negative, -torch.ones(1, 4))
+        self.assertIs(model.asserted_sliding, False)
         self.assertIs(model.model.layers[0], original)
 
     def test_chunked_prefill_is_untouched_until_final_prompt_position(self):
@@ -82,6 +89,7 @@ class MLXBackendTests(unittest.TestCase):
         np.testing.assert_allclose(outputs[0][0, -1], np.full(4, 3))
         np.testing.assert_allclose(outputs[1][0, -1], np.full(4, 6))
         np.testing.assert_allclose(outputs[2][0, -1], np.full(4, 7))
+        self.assertIs(model.asserted_sliding, False)
         self.assertIs(model.model.layers[0], original)
 
     def test_running_vector_does_not_retain_pair_tensors(self):
