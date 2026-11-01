@@ -9,7 +9,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from steer.main import MODELS, rank_main, sweep_main, validation_turns
+from steer.main import MLX_MISTRAL, MODELS, rank_main, sweep_main, validation_turns
 from test_contrastive_pairs import make_dialogue
 
 
@@ -82,6 +82,28 @@ class SweepTests(unittest.TestCase):
                 review = list(csv.DictReader(file))
             self.assertEqual(len(review), 2)
             self.assertEqual({r["constraint_ok"] for r in review}, {""})
+
+    def test_mlx_sweep_reuses_quantized_backend_for_both_conditions(self):
+        import torch
+
+        saved = {
+            "split": "train", "model_id": MODELS["mistral"],
+            "backend": "mlx", "checkpoint_id": MLX_MISTRAL,
+            "layers": [8], "mean_difference": torch.ones(1, 4),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            generated = Mock(side_effect=["baseline", "steered"])
+            loader = Mock(return_value=(Mock(), Mock()))
+            with patch("steer.main.choose_backend", return_value="mlx"), \
+                 patch("steer.main.torch.load", return_value=saved), \
+                 patch("steer.main.load_dataset", return_value=[make_dialogue()]), \
+                 patch("steer.main.load_experiment_model", loader), \
+                 patch("steer.main.mlx_generate_response", generated), \
+                 redirect_stdout(io.StringIO()):
+                sweep_main(["--activations", "train.pt", "--limit", "1",
+                            "--strengths", "1", "--output-dir", directory])
+            loader.assert_called_once_with(MODELS["mistral"], "mlx", None)
+            self.assertEqual(generated.call_count, 2)
 
 
 if __name__ == "__main__":

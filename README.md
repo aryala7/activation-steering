@@ -3,11 +3,33 @@
 One experiment pipeline: load MultiWOZ 2.2, generate contrastive response pairs,
 run the model, and save activations and steering directions.
 
+On native Apple Silicon, `--backend auto` uses a 4-bit MLX Mistral checkpoint.
+Install both extras (`--extra models --extra mac`) and use an arm64 Python.
+MLX cannot run under an Intel/Rosetta Python process. On other machines the
+default backend remains PyTorch. Use `--backend torch` explicitly only if the
+machine has enough memory for full-precision Mistral.
+
 ## Run
 
 ```sh
 uv run --no-editable --extra models steer --limit 10 --layers 0 7 14
 ```
+
+For a Mac mini M4 with 16 GB, start with:
+
+```sh
+uv run --no-editable --extra models --extra mac steer \
+  --model mistral --split train --limit 30 --layers 8 12 16 20 24 \
+  --output-dir outputs/mistral-mlx-train
+uv run --no-editable --extra models --extra mac steer sweep \
+  --activations outputs/mistral-mlx-train/activations.pt \
+  --limit 5 --strengths 0.5 1 --output-dir outputs/mistral-mlx-sweep
+```
+
+The 4-bit checkpoint is downloaded on the first run. The five-turn sweep is
+only a smoke test; increase the limits after verifying that it completes.
+Extraction and sweep must use the same backend and checkpoint. `--device` is
+for PyTorch only; MLX uses Apple Silicon automatically.
 
 The command installs the required dependencies and downloads the dataset/model
 when necessary. `--no-editable` avoids the macOS hidden `.pth` import issue.
@@ -20,6 +42,11 @@ Options:
 - `--model`: `mistral` (default), `llama`, or a full Hugging Face model ID.
 - `--layers`: zero-based transformer block indices, default `14`.
 - `--device`: `cpu` (default), `cuda`, or `mps`.
+- `--backend`: `auto` (MLX on native Apple Silicon, PyTorch elsewhere), `mlx`,
+  or `torch`.
+- `--save-pair-activations`: on MLX, opt in to retaining all positive/negative
+  activations for visualization. By default only the running mean, direction,
+  and pairs are retained to reduce RAM use; PyTorch retains the old full output.
 - `--output-dir`: results directory, default `outputs`.
 
 Each run writes `pairs.jsonl` and `activations.pt` to the output directory,
@@ -45,7 +72,9 @@ steering vectors are computed independently for each model.
 
 ## Select a steering layer (Mistral)
 
-First extract candidate layers **from training dialogues only**:
+First extract candidate layers **from training dialogues only**. On Apple
+Silicon, add `--extra mac` to each command below and use the same MLX checkpoint
+for extraction and evaluation:
 
 ```sh
 uv run --no-editable --extra models steer --model mistral --split train \
@@ -63,8 +92,7 @@ uv run --no-editable --extra models steer sweep \
 ```
 
 The sweep uses the raw mean difference at each layer and greedy generation.
-It requires the training artifact to use Mistral. Start with a few turns: a
-7B model on CPU needs substantial RAM and may generate very slowly. For the
+It requires the training artifact to use Mistral. Start with a few turns. For the
 actual layer comparison, increase `--limit` (for example to 100) and, after
 the coarse sweep, extract and test neighboring layers in a separate run.
 The `--max-new-tokens` default is 64; use the same value for every condition.
@@ -139,9 +167,10 @@ in the dialogue history. It is removed after each generation.
 
 The activation file stores:
 
-- Positive/negative activations and differences: `[pairs, layers, hidden_size]`.
 - Raw mean differences and unit directions: `[layers, hidden_size]`.
 - Source pairs and model, layer, token-position, dataset, split, and seed metadata.
+- Positive/negative activations and differences: `[pairs, layers, hidden_size]`
+  with PyTorch or when passing `--save-pair-activations` on MLX.
 
 Differences are positive minus negative. Raw means retain their magnitude;
 unit directions are normalized separately for each layer.

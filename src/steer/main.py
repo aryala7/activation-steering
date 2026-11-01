@@ -3,12 +3,14 @@
 import argparse
 import csv
 import json
+import platform
 import random
 import sys
 from pathlib import Path
 
 from steer.contrastive_pairs import create_pairs, extract_slot_constraints, is_user
-from steer.models.model import generate_response, make_vector
+from steer.models.model import (generate_response, make_vector,
+                                mlx_capture_pair, mlx_generate_response)
 from steer.ontology import SLOT_VALUES
 from datasets import load_dataset
 import torch
@@ -19,6 +21,37 @@ MODELS = {
     "mistral": "mistralai/Mistral-7B-Instruct-v0.3",
     "llama": "meta-llama/Llama-3.1-8B-Instruct",
 }
+MLX_MISTRAL = "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
+
+
+def choose_backend(requested):
+    apple_silicon = sys.platform == "darwin" and platform.machine() == "arm64"
+    backend = "mlx" if requested == "auto" and apple_silicon else requested
+    if backend == "auto":
+        backend = "torch"
+    if backend == "mlx" and not apple_silicon:
+        raise ValueError("MLX requires native arm64 Python on Apple Silicon (not Rosetta)")
+    return backend
+
+
+def load_experiment_model(model_id, backend, device):
+    if backend == "mlx":
+        if model_id != MODELS["mistral"]:
+            raise ValueError("The MLX backend currently supports Mistral only")
+        if device is not None:
+            raise ValueError("The MLX backend selects the Apple GPU; omit --device")
+        try:
+            from mlx_lm import load
+        except ImportError as error:
+            raise RuntimeError("Install the Mac backend with uv run --extra models --extra mac") from error
+        model, tokenizer = load(MLX_MISTRAL)
+        return model, tokenizer
+
+    device = device or "cpu"
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.float32)
+    model.to(device).eval()
+    return model, tokenizer
 
 
 def validation_turns(rows, limit):
@@ -64,7 +97,8 @@ def sweep_main(argv):
     parser.add_argument("--limit", type=int, default=10, help="validation assistant turns")
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/sweep"))
-    parser.add_argument("--device", choices=["cpu", "cuda", "mps"], default="cpu")
+    parser.add_argument("--backend", choices=["auto", "torch", "mlx"], default="auto")
+    parser.add_argument("--device", choices=["cpu", "cuda", "mps"])
     args = parser.parse_args(argv)
     if args.limit < 1 or args.max_new_tokens < 1:
         parser.error("--limit and --max-new-tokens must be positive")
@@ -72,12 +106,20 @@ def sweep_main(argv):
         parser.error("--strengths must contain finite positive numbers")
     if len(set(args.strengths)) != len(args.strengths):
         parser.error("--strengths must be unique")
+    try:
+        backend = choose_backend(args.backend)
+    except ValueError as error:
+        parser.error(str(error))
 
     # The file is produced by this project's extraction command. Loading only
     # tensors and elementary types avoids executing arbitrary pickle objects.
     saved = torch.load(args.activations, map_location="cpu", weights_only=True)
     if saved.get("split") != "train" or saved.get("model_id") != MODELS["mistral"]:
         parser.error("Use train activations extracted from the Mistral model")
+    if saved.get("backend", "torch") != backend:
+        parser.error("Use activations extracted with the same --backend as the sweep")
+    if backend == "mlx" and saved.get("checkpoint_id") != MLX_MISTRAL:
+        parser.error("Use activations from the same 4-bit MLX checkpoint")
     saved_layers = saved["layers"]
     layers = args.layers if args.layers is not None else saved_layers
     if not layers or len(set(layers)) != len(layers) or set(layers) - set(saved_layers):
@@ -92,12 +134,13 @@ def sweep_main(argv):
     turns = list(validation_turns(rows, args.limit))
     if not turns:
         parser.error("No eligible validation turns found")
-    print(f"Loaded {len(turns)} {args.eval_split} turns. Loading Mistral on {args.device}...")
-    tokenizer = AutoTokenizer.from_pretrained(MODELS["mistral"])
-    model = AutoModelForCausalLM.from_pretrained(MODELS["mistral"], dtype=torch.float32)
-    model.to(args.device).eval()
+    print(f"Loaded {len(turns)} {args.eval_split} turns. Loading Mistral ({backend})...")
+    try:
+        model, tokenizer = load_experiment_model(MODELS["mistral"], backend, args.device)
+    except ValueError as error:
+        parser.error(str(error))
     revision = saved.get("model_revision")
-    if revision and model.config._commit_hash and revision != model.config._commit_hash:
+    if backend == "torch" and revision and model.config._commit_hash and revision != model.config._commit_hash:
         parser.error("Mistral checkpoint revision differs from the extraction checkpoint")
 
     conditions = [(None, 0.0)] + [
@@ -110,7 +153,8 @@ def sweep_main(argv):
         for turn in turns:
             for layer, strength in conditions:
                 vector = None if layer is None else vectors[saved_layers.index(layer)]
-                response = generate_response(
+                generate = mlx_generate_response if backend == "mlx" else generate_response
+                response = generate(
                     model, tokenizer, turn["messages"], args.max_new_tokens,
                     layer=layer, vector=vector, strength=strength,
                 )
@@ -198,7 +242,10 @@ def main(argv=None) -> None:
         help="Model alias (mistral or llama) or Hugging Face model ID; default: mistral",
     )
     parser.add_argument("--layers", nargs="+", type=int, default=[14])
-    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps"])
+    parser.add_argument("--backend", choices=["auto", "torch", "mlx"], default="auto")
+    parser.add_argument("--device", choices=["cpu", "cuda", "mps"])
+    parser.add_argument("--save-pair-activations", action="store_true",
+                        help="retain each positive/negative activation (uses more RAM)")
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
     args = parser.parse_args(argv)
     args.model = MODELS.get(args.model, args.model)
@@ -206,6 +253,14 @@ def main(argv=None) -> None:
         parser.error("--limit must be positive")
     if min(args.layers) < 0 or len(set(args.layers)) != len(args.layers):
         parser.error("--layers must contain unique, nonnegative indices")
+    try:
+        backend = choose_backend(args.backend)
+        if backend == "mlx" and args.model != MODELS["mistral"]:
+            raise ValueError("The MLX backend currently supports Mistral only")
+        if backend == "mlx" and args.device is not None:
+            raise ValueError("The MLX backend selects the Apple GPU; omit --device")
+    except ValueError as error:
+        parser.error(str(error))
 
     # 1. Generate contrastive pairs from the selected dialogues.
     print(f"Loading {DATASET_ID} ({args.split})...")
@@ -219,14 +274,21 @@ def main(argv=None) -> None:
     print(f"Created {len(pairs)} pairs.")
 
     # 2. Load the model once and capture both responses with their context.
-    print(f"Loading {args.model} on {args.device}...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float32)
-    model.to(args.device).eval()
-    result = make_vector(model, tokenizer, pairs, args.layers)
+    print(f"Loading {args.model} ({backend})...")
+    model, tokenizer = load_experiment_model(args.model, backend, args.device)
+    if backend == "mlx":
+        result = make_vector(
+            model, tokenizer, pairs, args.layers,
+            capture_pair=lambda pair: mlx_capture_pair(model, tokenizer, pair, args.layers),
+            retain_pairs=args.save_pair_activations,
+        )
+    else:
+        result = make_vector(model, tokenizer, pairs, args.layers)
     result.update({
         "model_id": args.model,
-        "model_revision": getattr(model.config, "_commit_hash", None),
+        "model_revision": getattr(getattr(model, "config", None), "_commit_hash", None),
+        "backend": backend,
+        "checkpoint_id": MLX_MISTRAL if backend == "mlx" else args.model,
         "torch_version": str(torch.__version__),
         "dataset_id": DATASET_ID,
         "split": args.split,
