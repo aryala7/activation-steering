@@ -14,7 +14,10 @@ dependencies = [
 [project.optional-dependencies]
 models = [
     "torch>=2.2",
-    "transformers>=4.45,<5",
+    # MLX-LM 0.32 needs Transformers 5.7+ on Apple Silicon. Keep the existing
+    # Transformers 4 range for the PyTorch path on other machines.
+    "transformers>=4.45,<5; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    "transformers>=5.7,<6; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "sentencepiece>=0.2",
     "protobuf>=4.25",
     # Intel Mac PyTorch 2.2 wheels use the NumPy 1.x ABI.
